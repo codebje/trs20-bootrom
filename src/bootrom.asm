@@ -5,9 +5,10 @@
 #include "z180registers.asm"
 
 ; Section definitions
-#code		RESTARTS,$0000,$0200	; RESTART vector table
-#code		BOOT,$0200		; BOOT code
-#data		DATA,*			; DATA starts after the code
+#code		RESTARTS,$0000,$0100	; RESTART vector table
+#code		BOOT,$0100		; BOOT code
+#data		DATA,$1000		; DATA starts after the code
+#data		UPLOAD,$2000		; uploaded file contents go here
 
 ; Constants and definitions
 STACK		equ	$F000		; point the stack at the end of SRAM
@@ -154,9 +155,9 @@ match:		ld	a,(hl)
 		inc	hl
 		ld	h,(hl)
 		ld	l,a
-		ld	bc, booting
-		push	bc
-		jp	(hl)
+		call	jump
+		jr	booting
+jump:		jp	(hl)
 
 unknown:	ld	hl, badcmd
 		call	asci0_xmit
@@ -198,7 +199,159 @@ boot_rom::	ret
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ymodem_upload
 #local
-ymodem_upload::	ret
+ymodem_upload::	push	af
+		push	bc
+		push	de
+		push	hl
+
+receive_file:	ld	bc, 0
+		ld	(block_nr), bc
+
+		; send 'C' up to 10 times waiting for packet zero
+		ld	b, 10
+metadata:	ld	a, 'C'
+		call	send_byte
+		ld	de, 5*100
+		call	recv_byte
+		jr	z, retry
+		jr	done
+
+retry:		djnz	metadata
+
+done:		pop	hl
+		pop	de
+		pop	bc
+		pop	af
+		ret
+
+flush_rx:	ld	hl, cmd
+		ld	bc, 1
+		ld	de, 100		; wait until a 1 second timeout has elapsed
+		call	recv_wait
+		jr	z, flush_rx
+		ret
+
+#data		DATA
+cmd		.ds	1		; the received command byte
+block_nr	.ds	2		; the expected block number
+#code		BOOT
+
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; bin_to_hex - convert an 8-bit binary value to hex digits
+;;
+;; https://stackoverflow.com/questions/22838444/convert-an-8bit-number-to-hex-in-z80-assembler
+;;
+;; in:		a	value
+;; out:		de	hex digits
+#local
+bin_to_hex::	push	af
+		push	bc
+		ld	c, a
+		call	shift
+		ld	e, a
+		ld	a, c
+		call	convert
+		ld	d, a
+		pop	bc
+		pop	af
+		ret
+
+shift:		rra		; shift higher nibble to lower
+		rra
+		rra
+		rra
+convert:	or	a, $f0
+		daa		; I've no idea if this will work on a Z180...
+		add	a, $a0
+		adc	a, $40
+		ret
+#endlocal
+
+
+; compute a CRC over the data at HL of size BC
+; result is in DE
+#local
+ym_crc::	push	hl
+		push	bc
+		push	af
+
+		ld	de,0
+		ld	(crc),de
+
+bytloop:	ld	a, (crc+1)	; pos = (crc >> 8) ^ data[i]
+		xor	(hl)
+		ld	(pos), a
+
+		ld	a, (crc)	; crc = crc << 8
+		ld	(crc+1), a
+		xor	a
+		ld	(crc), a
+
+		push	hl
+		ld	hl, pos
+		xor	a
+		rrd			; a = pos & 0xf, pos = pos >> 4
+		sla	a
+		sla	(hl)
+		ld	d, (hl)
+
+		ld	h, hi(ym_crc_tab)
+		add	a, lo(ym_crc_tab)
+		ld	l, a
+
+		ld	a, (hl)		; crc = crc ^ ym_crc_tab[pos & 0xf]
+		inc	hl
+		ld	e, (hl)
+		ld	hl, crc
+		xor	a, (hl)
+		ld	(hl), a
+		inc	hl
+		ld	a, (hl)
+		xor	e
+		ld	(hl), a
+
+		ld	h, hi(ym_crc_tab+32)
+		ld	a, d
+		add	a, lo(ym_crc_tab+32)
+		ld	l, a
+
+		ld	a, (hl)		; crc = crc ^ ym_crc_tab[(pos >> 4) + 16]
+		inc	hl
+		ld	e, (hl)
+		ld	hl, crc
+		xor	a, (hl)
+		ld	(hl), a
+		inc	hl
+		ld	a, (hl)
+		xor	e
+		ld	(hl), a
+
+		pop	hl
+		inc	hl
+		dec	bc
+		ld	a,b
+		or	c
+		jr	nz, bytloop
+
+		ld	de,(crc)
+		pop	af
+		pop	bc
+		pop	hl
+		ret
+
+pos:		.db	0
+crc:		.dw	0
+
+; align this table such that adding $1e to either 16-word half will never overflow the low byte
+		if lo($) + $3e > $ff
+		.align	$40
+		endif
+ym_crc_tab:	.dw	$0000, $1021, $2042, $3063, $4084, $50a5, $60c6, $70e7
+		.dw	$8108, $9129, $a14a, $b16b, $c18c, $d1ad, $e1ce, $f1ef
+		.dw	$0000, $1231, $2462, $3653, $48c4, $5af5, $6ca6, $7e97
+		.dw	$9188, $83b9, $b5ea, $a7db, $d94c, $cb7d, $fd2e, $ef1f
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -211,10 +364,84 @@ ymodem_upload::	ret
 ;; out:		the user input in A
 #local
 boot_monitor::	push	bc
-usrwait:	ld	bc, 3000	; 3000x100Hz spits out one message every 30 seconds
-
-		ld	hl, message
+usrwait:	ld	hl, message
 		call	asci0_xmit	; shout into the void
+
+		ld	hl, input
+		ld	bc, 1
+		ld	de, 3000	; 3000x100Hz = 30 second timeout
+		call	recv_wait
+
+		jr	z, usrwait	; on timeout, go back and shout again
+
+get_char:	ld	a, (input)
+		pop	bc
+		ret
+
+input		.ds	1
+
+message		.db	13,10
+		.text	'TRS-20 online and ready'
+		.db	13,10,0
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; send_byte
+;;
+;; Sends one byte via ASCI0
+;;
+;; in:		a	the byte to send
+;; out:		none
+#local
+send_byte::	push	af
+		push	bc
+		asci0_send a
+		pop	bc
+		pop	af
+		ret
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; recv_byte
+;;
+;; Receives one byte via ASCI0, with a timeout
+;;
+;; in:		de	the timeout measured in 100Hz ticks
+;; out:		a	the byte that was received
+;;		zf	zf is SET if a timeout occurred
+#local
+recv_byte::	push	bc
+		push	de
+		push	hl
+
+		ld	hl, byte+1	; write to the ld operand
+		ld	bc, 1
+		call	recv_wait
+byte:		ld	a, 0
+
+		pop	hl
+		pop	de
+		pop	bc
+		ret
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; recv_wait
+;;
+;; Receives BC bytes from ASCI0 into HL, with a timeout of DEx100Hz.
+;;
+;; in:		bc	count of bytes to read
+;;		hl	destination buffer
+;;		de	timeout, in units of 100Hz
+;; out:		zf	zf is SET if a timeout occurred
+;;		bc	the count of bytes left unread
+;;		de	the original timeout value
+;;		hl	one past the last byte read
+;;		a	undefined
+#local
+recv_wait::	push	de		; preserve the timeout value
+input_loop:	pop	de
+		push	de
 
 		; check for input on ASCI0 in a loop
 timeout:	in0	a, (STAT0)
@@ -229,45 +456,32 @@ timeout:	in0	a, (STAT0)
 		jr	z, timeout	; not set: check for input again
 		in0	a, (TMDR0L)	; reset TIF0 by reading TMDR0
 		in0	a, (TMDR0H)	; must read both halves in order!  
-		dec	bc		; track how many times PRT0 has fired
-		ld	a,b
-		or	a,c
+		dec	de		; track how many times PRT0 has fired
+		ld	a,d
+		or	a,e
 		jr	nz, timeout
 
-		jr	usrwait		; go back and shout again
+		; failed to receive a byte: abort with Z set
+		pop	de
+		ret
 
 error:		ld	a, 01100100b	; Reset errors (bit 4=0)
 		out0	(CNTLA0), a
 		jr	timeout
 
 get_char:	in0	a, (RDR0)
-		pop	bc
+		ld	(hl), a
+		inc	hl
+		dec	bc
+		ld	a, b
+		or	a, c
+		jr	nz, input_loop
+
+		or	a, 1		; clear Z
+return:		pop	de
 		ret
 
-message		.db	13,10
-		.text	'TRS-20 online and ready'
-		.db	13,10,0
 #endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; setup_asci0
-;; 
-;; Configures ASCI0 as 38400 8N1. Does not enable interrupts.
-;;
-setup_asci0:	push	af
-		ld	a, 01100100b		; RE, TE, 8N1
-		out0	(CNTLA0), a
-
-		; System clock is 18.432MHz.
-		;	bit 5, PS=1 selects /30
-		;	bit 3, DR=0 selects /16
-		;	bis 2-0, SS=000 selects /1
-		;	18432000 / 30 / 16 / 1 = 38400 baud
-		ld	a, 00100000b
-		out0	(CNTLB0), a
-
-		pop	af
-		ret
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; asci0_xmit 
