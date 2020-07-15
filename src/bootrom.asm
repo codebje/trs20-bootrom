@@ -197,48 +197,6 @@ boot_rom::	ret
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; ymodem_upload
-#local
-ymodem_upload::	push	af
-		push	bc
-		push	de
-		push	hl
-
-receive_file:	ld	bc, 0
-		ld	(block_nr), bc
-
-		; send 'C' up to 10 times waiting for packet zero
-		ld	b, 10
-metadata:	ld	a, 'C'
-		call	send_byte
-		ld	de, 5*100
-		call	recv_byte
-		jr	z, retry
-		jr	done
-
-retry:		djnz	metadata
-
-done:		pop	hl
-		pop	de
-		pop	bc
-		pop	af
-		ret
-
-flush_rx:	ld	hl, cmd
-		ld	bc, 1
-		ld	de, 100		; wait until a 1 second timeout has elapsed
-		call	recv_wait
-		jr	z, flush_rx
-		ret
-
-#data		DATA
-cmd		.ds	1		; the received command byte
-block_nr	.ds	2		; the expected block number
-#code		BOOT
-
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; bin_to_hex - convert an 8-bit binary value to hex digits
 ;;
 ;; https://stackoverflow.com/questions/22838444/convert-an-8bit-number-to-hex-in-z80-assembler
@@ -267,91 +225,6 @@ convert:	or	a, $f0
 		add	a, $a0
 		adc	a, $40
 		ret
-#endlocal
-
-
-; compute a CRC over the data at HL of size BC
-; result is in DE
-#local
-ym_crc::	push	hl
-		push	bc
-		push	af
-
-		ld	de,0
-		ld	(crc),de
-
-bytloop:	ld	a, (crc+1)	; pos = (crc >> 8) ^ data[i]
-		xor	(hl)
-		ld	(pos), a
-
-		ld	a, (crc)	; crc = crc << 8
-		ld	(crc+1), a
-		xor	a
-		ld	(crc), a
-
-		push	hl
-		ld	hl, pos
-		xor	a
-		rrd			; a = pos & 0xf, pos = pos >> 4
-		sla	a
-		sla	(hl)
-		ld	d, (hl)
-
-		ld	h, hi(ym_crc_tab)
-		add	a, lo(ym_crc_tab)
-		ld	l, a
-
-		ld	a, (hl)		; crc = crc ^ ym_crc_tab[pos & 0xf]
-		inc	hl
-		ld	e, (hl)
-		ld	hl, crc
-		xor	a, (hl)
-		ld	(hl), a
-		inc	hl
-		ld	a, (hl)
-		xor	e
-		ld	(hl), a
-
-		ld	h, hi(ym_crc_tab+32)
-		ld	a, d
-		add	a, lo(ym_crc_tab+32)
-		ld	l, a
-
-		ld	a, (hl)		; crc = crc ^ ym_crc_tab[(pos >> 4) + 16]
-		inc	hl
-		ld	e, (hl)
-		ld	hl, crc
-		xor	a, (hl)
-		ld	(hl), a
-		inc	hl
-		ld	a, (hl)
-		xor	e
-		ld	(hl), a
-
-		pop	hl
-		inc	hl
-		dec	bc
-		ld	a,b
-		or	c
-		jr	nz, bytloop
-
-		ld	de,(crc)
-		pop	af
-		pop	bc
-		pop	hl
-		ret
-
-pos:		.db	0
-crc:		.dw	0
-
-; align this table such that adding $1e to either 16-word half will never overflow the low byte
-		if lo($) + $3e > $ff
-		.align	$40
-		endif
-ym_crc_tab:	.dw	$0000, $1021, $2042, $3063, $4084, $50a5, $60c6, $70e7
-		.dw	$8108, $9129, $a14a, $b16b, $c18c, $d1ad, $e1ce, $f1ef
-		.dw	$0000, $1231, $2462, $3653, $48c4, $5af5, $6ca6, $7e97
-		.dw	$9188, $83b9, $b5ea, $a7db, $d94c, $cb7d, $fd2e, $ef1f
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -515,8 +388,9 @@ done:		pop	hl
 		pop	bc
 		pop	af
 		ret
-
 #endlocal
+
+#include "ymodem.asm"
 
 #data		DATA
 #end
