@@ -33,9 +33,12 @@ tdre		defl	$
 
 		.org	$0000
 reset:		jp	_start
-four:		.db	'4'
+three:		.db	'3'
 
 #code		BOOT
+
+		; include a visual marker of the boot rom version
+version:	.text	13, 10, 'TRS-20 boot rom v20200726.00', 13, 10, 0
 
 _start:		xor	a
 		out0	(RCR), a	; disable the DRAM refresh
@@ -50,11 +53,11 @@ _start:		xor	a
 		out0	(CNTLA0), a
 
 		; System clock is 18.432MHz.
-		;	bit 5, PS=1 selects /30
+		;	bit 5, PS=0 selects /10
 		;	bit 3, DR=0 selects /16
-		;	bis 2-0, SS=000 selects /1
-		;	18432000 / 30 / 16 / 1 = 38400 baud
-		ld	a, 00100000b
+		;	bis 2-0, SS=001 selects /2
+		;	18432000 / 10 / 16 / 2 = 57600 baud
+		ld	a, 00000001b
 		out0	(CNTLB0), a
 
 		; Transmit a '1' to indicate we got this far
@@ -71,7 +74,7 @@ _start:		xor	a
 		ld	a, $08
 		out0	(SAR0B), a
 
-		ld	bc, BOOT_end	; copy all the code segments
+		ld	bc, CODE_end	; copy all the code segments
 		out0	(BCR0L),c
 		out0	(BCR0H),b
 
@@ -93,11 +96,8 @@ _start:		xor	a
 		out0	(DMODE),c
 		out0	(DSTAT),b	; burst mode will halt CPU until complete
 
-		asci0_send '2'
-
-		; A19 went high during the DMA transfer, and the ROM overlay is no longer
-		; in effect. Code is now executing from SRAM - so set up Common Area 1 to
-		; the first page of the ROM again.
+		; The ROM needs to relinquish its hold over low memory. Set up the ROM in
+		; the top 1K of logical address space, and jump there.
 
 		; Set up the MMU:
 		;   Common Area 1	f000-ffff	80000-80fff
@@ -107,11 +107,18 @@ _start:		xor	a
 		out0	(CBR), a
 
 		; confirm that MMU programming didn't fault
-		asci0_send '3'
+		asci0_send '2'
 
 		; read a byte from high-ROM to verify MMU is programmed for it
-		ld	hl, four + $f000
+		ld	hl, three + $f000
 		asci0_send (hl)
+
+		jp	$+3+$f000
+
+		; jump back to RAM
+		jp	$+3
+
+		asci0_send '4'
 
 		; attempt to modify a byte in what should now be SRAM
 		ld	a, '5'
@@ -170,10 +177,8 @@ cmdtab:		.db	'?'
 		.dw	boot_help
 		.db	'y'
 		.dw	ymodem_upload
-		.db	'b'
-		.dw	boot_rom
-		;.db	'w'
-		;.dw	burn_rom
+		.db	'j'
+		.dw	boot_execute
 		.db	0
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -186,14 +191,14 @@ boot_help::	push	hl
 		ret
 message		.text	'Boot ROM menu:',13,10
 		.text	'  ? - this help',13,10
-		.text	'  b - boot ROM+4k',13,10
+		.text	'  j - jump to uploaded code',13,10
 		.text	'  y - ymodem receive',13,10,0
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; boot_rom
+;; boot_execute
 #local
-boot_rom::	ret
+boot_execute::	jp	upload_file
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -237,7 +242,7 @@ convert:	or	a, $f0
 ;; out:		the user input in A
 #local
 boot_monitor::	push	bc
-usrwait:	ld	hl, message
+usrwait:	ld	hl, version
 		call	asci0_xmit	; shout into the void
 
 		ld	hl, input
@@ -253,9 +258,6 @@ get_char:	ld	a, (input)
 
 input		.ds	1
 
-message		.db	13,10
-		.text	'TRS-20 online and ready'
-		.db	13,10,0
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

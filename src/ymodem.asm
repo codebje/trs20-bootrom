@@ -6,6 +6,10 @@ YM_NAK		equ	$15		; receive error
 YM_CAN		equ	$18		; cancel transmission
 YM_CRC		equ	'C'		; request CRC-16 mode
 
+#data		UPLOAD
+upload_file	equ	$
+#code		BOOT
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ymodem_upload
 ;;
@@ -109,8 +113,6 @@ msg_complete:	.text	'complete', 13, 10, 0
 #data		DATA
 cmd		.ds	1		; the received command byte
 block_nr	.ds	1		; the expected block number
-#data		UPLOAD
-upload_file	equ	$
 #code		BOOT
 
 #endlocal
