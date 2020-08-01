@@ -38,7 +38,7 @@ three:		.db	'3'
 #code		BOOT
 
 		; include a visual marker of the boot rom version
-version:	.text	13, 10, 'TRS-20 boot rom v20200726.00', 13, 10, 0
+version:	.text	13, 10, 'TRS-20 boot rom v20200727.01', 13, 10, 0
 
 _start:		xor	a
 		out0	(RCR), a	; disable the DRAM refresh
@@ -63,7 +63,31 @@ _start:		xor	a
 		; Transmit a '1' to indicate we got this far
 		asci0_send '1'
 
-		; Copy 4k of ROM into RAM. Programming the ROM requires that code is not being executed out of ROM.
+		; The ROM masking is still in effect - SRAM is unreachable. Set up the MMU to allow a jump to a
+		; high physical address, which will disable ROM masking.
+
+		; Set up the MMU:	logical		physical
+		;   Common Area 1	f000-ffff	80000-80fff
+		;   Bank Area		0000-efff	00000-0efff
+		;   Common Area 1	0000-0000	00000-00000
+		xor	a
+		out0	(BBR), a
+		ld	a, $80 - $0F
+		out0	(CBR), a
+		ld	a, $F0
+		out0	(CBAR), a
+
+		; confirm that MMU programming didn't fault
+		asci0_send '2'
+
+		jp	$+3+$f000
+
+		; send a byte from ROM at the high logical address to confirm MMU is good
+		ld	hl, three + $f000
+		asci0_send (hl)
+
+		; SRAM should now be unmasked. Copy ROM into RAM, then jump back.
+
 		xor	a		; destination address 00000
 		out0	(DAR0L), a
 		out0	(DAR0H), a
@@ -74,7 +98,7 @@ _start:		xor	a
 		ld	a, $08
 		out0	(SAR0B), a
 
-		ld	bc, CODE_end	; copy all the code segments
+		ld	bc, BOOT_end	; copy all the code segments
 		out0	(BCR0L),c
 		out0	(BCR0H),b
 
@@ -96,26 +120,6 @@ _start:		xor	a
 		out0	(DMODE),c
 		out0	(DSTAT),b	; burst mode will halt CPU until complete
 
-		; The ROM needs to relinquish its hold over low memory. Set up the ROM in
-		; the top 1K of logical address space, and jump there.
-
-		; Set up the MMU:
-		;   Common Area 1	f000-ffff	80000-80fff
-		;   Bank Area		0000-efff	00000-0efff
-		;   Common Area 1	0000-0000	00000-00000
-		ld	a, $80
-		out0	(CBR), a
-
-		; confirm that MMU programming didn't fault
-		asci0_send '2'
-
-		; read a byte from high-ROM to verify MMU is programmed for it
-		ld	hl, three + $f000
-		asci0_send (hl)
-
-		jp	$+3+$f000
-
-		; jump back to RAM
 		jp	$+3
 
 		asci0_send '4'
