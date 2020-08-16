@@ -6,21 +6,17 @@ YM_NAK		equ	$15		; receive error
 YM_CAN		equ	$18		; cancel transmission
 YM_CRC		equ	'C'		; request CRC-16 mode
 
-#data		UPLOAD
-upload_file	equ	$
-#code		BOOT
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ymodem_upload
 ;;
-;; Writes files received in sequence starting from (upload_file).
+;; Writes files received in sequence starting from (UPLOAD).
 #local
 ymodem_upload::	push	af
 		push	bc
 		push	de
 		push	hl
 
-		ld	hl, upload_file
+		ld	hl, UPLOAD
 		push	hl
 
 		ld	hl, ready
@@ -127,14 +123,18 @@ block_nr	.ds	1		; the expected block number
 ;; out:		zf	set on error
 ;;		a	the command code received
 ;;		c	the packet sequence number
+;;		b	the number of retries remaining
 #local
 recv_packet::	push	de
 		push	hl
 
+		ld	a, c
+		ld	(metadata+1), a
+
 		ld	b, 10		; retry ten times
 		jr	read_cmd
 
-metadata:	ld	a, c
+metadata:	ld	a, 0
 		call	send_byte
 
 read_cmd:	ld	de, 5*100
@@ -156,12 +156,13 @@ read_cmd:	ld	de, 5*100
 		call	flush_rx	; anything else, clear it out and retry
 
 retry:		djnz	metadata
+		xor	a		; djnz doesn't set zf, so set it here
 
 done:		pop	hl
 		pop	de
 		ret
 
-cancel:		ld	de, 1*100
+cancel:		ld	de, 5*100
 		call	recv_byte
 		jr	z, retry
 		cp	a, YM_CAN
@@ -192,14 +193,22 @@ recv_body:	ld	(cmd), a
 		jr	z, $+5
 		ld	bc, 1026
 
+		push	hl
+		push	bc
+
 		ld	de, 1*100
 		call	recv_wait
 
 		pop	bc
 		pop	hl
 
-		jr	z, retry
+		jr	z, body_retry
+
 		call	ym_crc		; CRC should be zero
+
+		pop	bc
+		pop	hl
+
 		ld	a, d
 		or	e
 		jr	nz, retry
@@ -208,6 +217,11 @@ recv_body:	ld	(cmd), a
 		ld	a, (cmd)
 		or	a		; clear zf
 		jr	done
+
+body_retry:	pop	bc
+		pop	hl
+		jr	retry
+
 cmd:		.db	0
 seq:		.db	0
 

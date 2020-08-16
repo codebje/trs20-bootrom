@@ -1,0 +1,7 @@
+../RomWBW/Source/RomDsk/ROM_1024KB/DUMP.COM
+../RomWBW/Source/RomDsk/ROM_1024KB/STAT.COM
+../RomWBW/Source/RomDsk/ROM_1024KB/LOAD.COM
+../cpmsuite/bin/ramdump.com
+../cpmsuite/bin/memchk.com
+../cpmsuite/bin/wipedsk.com
+../cpmsuite/bin/ymodem.com

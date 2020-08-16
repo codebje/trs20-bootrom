@@ -1,0 +1,23 @@
+# TRS-20 32KB ROM disk
+diskdef rom_32kb
+  seclen 128
+  tracks 16
+  sectrk 16
+  blocksize 1024
+  maxdir 32
+  skew 0
+  boottrk 0
+  os 2.2
+end
+
+# TRS-20 384KB RAM disk
+diskdef ram_384kb
+  seclen 128
+  tracks 192
+  sectrk 16
+  blocksize 1024
+  maxdir 128
+  skew 0
+  boottrk 0
+  os 2.2
+end

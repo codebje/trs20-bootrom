@@ -7,11 +7,14 @@
 ; Section definitions
 #code		RESTARTS,$0000,$0100	; RESTART vector table
 #code		BOOT,$0100		; BOOT code
-#data		DATA,$1000		; DATA starts after the code
-#data		UPLOAD,$2000		; uploaded file contents go here
+#code		CPM			; The CPM segment is straight after the boot code
+#code		ROMDISK,$2000,$8000	; the ROM disk is 32kb and must be aligned to 256 bytes
+#data		DATA			; DATA starts after the code
+#data		BIOSDATA,$DD00,$300	; BIOS data region
 
 ; Constants and definitions
-STACK		equ	$F000		; point the stack at the end of SRAM
+STACK		equ	BIOSDATA	; point the stack at the end of SRAM
+UPLOAD		equ	$2000		; uploaded code beyond CPM
 
 ; Macros
 
@@ -33,12 +36,13 @@ tdre		defl	$
 
 		.org	$0000
 reset:		jp	_start
-three:		.db	'3'
 
 #code		BOOT
 
 		; include a visual marker of the boot rom version
-version:	.text	13, 10, 'TRS-20 boot rom v20200727.01', 13, 10, 0
+version:	defm	13, 10, 'TRS-20 boot rom '
+		defm	__date__
+		defm	13, 10, 0
 
 _start:		xor	a
 		out0	(RCR), a	; disable the DRAM refresh
@@ -60,9 +64,6 @@ _start:		xor	a
 		ld	a, 00000001b
 		out0	(CNTLB0), a
 
-		; Transmit a '1' to indicate we got this far
-		asci0_send '1'
-
 		; The ROM masking is still in effect - SRAM is unreachable. Set up the MMU to allow a jump to a
 		; high physical address, which will disable ROM masking.
 
@@ -77,14 +78,7 @@ _start:		xor	a
 		ld	a, $F0
 		out0	(CBAR), a
 
-		; confirm that MMU programming didn't fault
-		asci0_send '2'
-
 		jp	$+3+$f000
-
-		; send a byte from ROM at the high logical address to confirm MMU is good
-		ld	hl, three + $f000
-		asci0_send (hl)
 
 		; SRAM should now be unmasked. Copy ROM into RAM, then jump back.
 
@@ -98,7 +92,7 @@ _start:		xor	a
 		ld	a, $08
 		out0	(SAR0B), a
 
-		ld	bc, BOOT_end	; copy all the code segments
+		ld	bc, CPM_end	; copy all the code segments
 		out0	(BCR0L),c
 		out0	(BCR0H),b
 
@@ -122,14 +116,6 @@ _start:		xor	a
 
 		jp	$+3
 
-		asci0_send '4'
-
-		; attempt to modify a byte in what should now be SRAM
-		ld	a, '5'
-		ld	(five+1),a
-five:		ld	a, '!'
-		asci0_send a
-
 		; Set up PRT0 with a 100Hz timer
 		ld	hl, 18432000/20/100 - 1
 		out0	(RLDR0L), l
@@ -137,16 +123,7 @@ five:		ld	a, '!'
 		ld	a, 00000001b	; enable PRT0, no interrupts
 		out0	(TCR), a
 
-		; Verify the PRT0 programming didn't fault
-		asci0_send '6'
-
 		ld	sp, STACK	; Set a writable stack location
-
-		; Verify the stack is writable
-		ld	b, '7'
-		push	bc
-		pop	de
-		asci0_send d
 
 booting:	call	boot_monitor	; get an input char
 
@@ -183,6 +160,8 @@ cmdtab:		.db	'?'
 		.dw	ymodem_upload
 		.db	'j'
 		.dw	boot_execute
+		.db	'c'
+		.dw	cpm_execute
 		.db	0
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -196,13 +175,86 @@ boot_help::	push	hl
 message		.text	'Boot ROM menu:',13,10
 		.text	'  ? - this help',13,10
 		.text	'  j - jump to uploaded code',13,10
-		.text	'  y - ymodem receive',13,10,0
+		.text	'  y - ymodem receive',13,10
+		.text	'  c - Start CP/M 2.2',13,10,0
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; boot_execute
 #local
-boot_execute::	jp	upload_file
+boot_execute::	jp	UPLOAD
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; cpm_execute
+#local
+fill_byte:	.db	$e5
+cpm_execute::	xor	a		; reset MMU to flat SRAM for all 64k
+		out0	(BBR), a	; Bank Area starts at physical 00000
+		out0	(CBR), a	; Common Area 1 starts at physical 0000
+		ld	a, $F0		; Bank Area starts at logical 0000
+		out0	(CBAR), a	; Common Area 1 starts at logical F000
+
+		xor	a		; destination address 20000
+		out0	(DAR0L), a	; source address FILL_BYTE in bank zero
+		out0	(DAR0H), a
+		out0	(SAR0B), a
+
+		ld	a, 2
+		out0	(DAR0B), a
+
+		ld	bc, fill_byte
+		out0	(SAR0L), c
+		out0	(SAR0H), b
+
+		ld	bc, 1
+		out0	(BCR0L),c
+		out0	(BCR0H),b
+
+		; copy the fill byte to $20000
+		ld	hl, 0110000000000010b
+		out0	(DMODE),l
+		out0	(DSTAT),h	; burst mode will halt CPU until complete
+
+		; then replicate that byte throughout the RAMDISK
+		xor	a
+		out0	(SAR0L), a
+		out0	(SAR0H), a
+		ld	a, 2
+		out0	(SAR0B), a
+
+		; first time around, copy 65535 times - BCR0 will then be zero, copying 65536 bytes next time
+		ld	a, $ff
+		out0	(BCR0L), a
+		out0	(BCR0H), a
+
+		ld	b, 6
+filler:		out0	(DSTAT), h
+		djnz	filler
+
+		; copy CPM into place
+		xor	a			; destination address 0E000
+		out0	(DAR0B), a
+		out0	(DAR0L), a
+		ld	a, $e0
+		out0	(DAR0H), a
+
+		ld	bc, CPM			; source address is the CPM segment ...
+		out0	(SAR0L), c
+		out0	(SAR0H), b
+		ld	a, $08			; ... in ROM
+		out0	(SAR0B), a
+
+		ld	bc, $2000 - CPM
+		out0	(BCR0L),c
+		out0	(BCR0H),b
+
+		ld	bc, 0110000000000010b	; MEM+ -> MEM+, burst mode, ch. 0 enable
+		out0	(DMODE),c
+		out0	(DSTAT),b		; burst mode will halt CPU until complete
+
+		jp	CPM_ENTRY
+
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -396,7 +448,17 @@ done:		pop	hl
 		ret
 #endlocal
 
-#include "ymodem.asm"
+#include 	"ymodem.asm"
+
+#code		CPM
+#include	"cbios.asm"
+
+		org ROMDISK
+#code		ROMDISK
+#insert		"../bin/romdisk.img"
 
 #data		DATA
+
+#assert		CPM_size <= $2000
+
 #end
