@@ -40,9 +40,7 @@ reset:		jp	_start
 #code		BOOT
 
 		; include a visual marker of the boot rom version
-version:	defm	13, 10, 'TRS-20 boot rom '
-		defm	__date__
-		defm	13, 10, 0
+version:	defm	13, 10, 'TRS-20 boot rom v20200816.01', 13, 10, 0
 
 _start:		xor	a
 		out0	(RCR), a	; disable the DRAM refresh
