@@ -1,13 +1,15 @@
-		.phase	CCP
-#include	"cpm/cpm22.asm"
 
-CCP		equ	(MEM-7)*1024		; $E000 - CCP entry point
-BDOS		equ	CCP + $806		; $E806 - BDOS entry point
-BIOS		equ	CCP + $1600		; $F600 - BIOS entry point
+BIOS		equ	$F600			; BIOS loads here
+CCP		equ	BIOS - $1600		; $E000 - CCP entry point
+BDOS		equ	BIOS - $0E00		; $E800 - BDOS entry point
+FBASE		equ	BDOS + 6
 IOBYTE		equ	$0003			; IO control byte location
 USERDRV		equ	$0004			; Current drive control byte
+ROMDISK		equ	$2000			; ROM disk location (plus $80000)
+OS_IMAGE	equ	$0A00			; offset into ROM of the OS
+OS_SIZE		equ	$1600			; Total size of the operating system
 
-#assert		$ == (BIOS)
+		.phase	BIOS
 
 ;**************************************************************
 ;*
@@ -137,7 +139,6 @@ BIOS_RAWOUT::
 bootmsg:	defm	13,10,'CP/M 2.2 copyright Digital Research',13,10
 		defm	'TRS-20 BIOS online',13,10,0
 
-CPM_ENTRY::	equ	$			; Entry-point for starting CPM from boot menu
 BIOS_REBOOT::					; COLD BOOT
 		xor	a			; set up initial IOBYTE and USERDRV
 		ld	(IOBYTE), a
@@ -169,7 +170,7 @@ outloop:	in0	a, (STAT0)
 ;; location 0,1,2	Set to JMP WBOOT (000H: JMP 4A03H + b)
 ;; location 3		Set initial value of IOBYTE, if implemented
 ;; location 4		High nibble = current user, low nibble = current drive
-;; location 5,6,7	Set to JMP BDOS, which is the primary entry point to
+;; location 5,6,7	Set to JMP FBASE, which is the primary entry point to
 ;;			CP/M for transient programs. (0005H: JMP 3C06H + b)
 ;;
 ;; Upon completion of the initialization, the WBOOT program must branch to
@@ -183,31 +184,32 @@ BIOS_WBOOT::	di				; WARM BOOT
 
 		ld	sp, STACK		; reset the stack
 
-		ld	a, $c3			; set up JMPs to WBOOT, BDOS, EXT.BIOS
+		ld	a, $c3			; set up JMPs to WBOOT, FBASE, EXT.BIOS
 		ld	(0), a
 		ld	(5), a
 		ld	($30), a
 		ld	bc, BIOS_WBOOT
 		ld	(1), bc
-		ld	bc, BDOS
+		ld	bc, FBASE
 		ld	(6), bc
 		ld	bc, BIOS_EXTFN
 		ld	($31), bc
 
-		;; Copy CP/M from ROM
+		;; Copy the OS from ROM
 		xor	a			; destination address 0E000
 		out0	(DAR0B), a
 		out0	(DAR0L), a
 		ld	a, $e0
 		out0	(DAR0H), a
 
-		ld	bc, CPM			; source address is the CPM segment ...
+		ld	bc, OS_IMAGE		; source address is the CPM segment ...
 		out0	(SAR0L), c
 		out0	(SAR0H), b
 		ld	a, $08			; ... in ROM
+ospage::	equ	$$-1
 		out0	(SAR0B), a
 
-		ld	bc, $2000 - CPM
+		ld	bc, OS_SIZE
 		out0	(BCR0L),c
 		out0	(BCR0H),b
 
@@ -253,7 +255,7 @@ BIOS_WBOOT::	di				; WARM BOOT
 loadcpm:	ld	a, (USERDRV)
 		ld	c, a
 
-		jp	CCP
+		jp	CCP+3
 
 #endlocal
 
@@ -797,17 +799,6 @@ done:		pop	hl
 		reti
 #endlocal
 
-		.align	$100
-ivec:		dw	irq_int1
-		dw	irq_int2
-		dw	irq_prt0
-		dw	irq_prt1
-		dw	irq_dma0
-		dw	irq_dma1
-		dw	irq_csio
-		dw	irq_asci0
-		dw	irq_asci1
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ASCI transmit/receive buffers
 ;;
@@ -820,14 +811,30 @@ ivec:		dw	irq_int1
 ;; is written at the write cursor location, and the write cursor is
 ;; incremented. With one producer and one consumer, locks are not needed.
 ;;
-		.dephase
-
-#data		BIOSDATA
-asci0_rx	ds	256
-asci0_tx	ds	256
 asci0_rx_read	ds	1
 asci0_rx_write	ds	1
 asci0_tx_read	ds	1
 asci0_tx_write	ds	1
 asci0_rx_error	ds	1
-#code		CPM
+
+		.align	$100
+ivec:		dw	irq_int1
+		dw	irq_int2
+		dw	irq_prt0
+		dw	irq_prt1
+		dw	irq_dma0
+		dw	irq_dma1
+		dw	irq_csio
+		dw	irq_asci0
+		dw	irq_asci1
+BIOS_DATA:	equ	ivec+$100
+
+#data		BIOSDATA
+asci0_rx	ds	256
+asci0_tx	ds	256
+
+avec:		ds	512
+		ds	255
+
+		.dephase
+

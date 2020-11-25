@@ -1,17 +1,7 @@
 # TRS-20 boot ROM
 
-The boot ROM for the TRS-20 is aimed at allowing self-hosted reprogramming, to minimise wear on the ROM socket. The code sets up the CPU, UART, and MMU, then enters a simple boot monitor that supports uploading more code to execute.
+The boot ROM for the TRS-20 is aimed at allowing self-hosted reprogramming, to minimise wear on the ROM socket. The code sets up the CPU, UART, and MMU, then boots up ZSDOS.
 
-```mermaid
-graph TD
-	A(Disable DRAM, INTs)
-  A --> B(Set CPU speed to 18.432MHz)
-  B --> C(Configure ASCI0 UART)
-  C --> D(Configure MMU for ROM)
-  D --> E(Jump to ROM)
-  E --> F(DMA copy ROM to RAM)
-  F --> G(Start PRT0 timer)
-  G --> H(Start boot monitor)
-```
+`zsystem.bin` is a binary image of a CCP and BDOS. It should be 5,362 in size with the CCP from `0000` to `07FF` and the BDOS from `0800` through to `15FF`. The components should be relocated to be at `E000` and `E800` respectively. Classic CP/M 2.2 will work, as will ZCPR1/ZSDOS. Other alternatives may also work, but haven't been tried.
 
-The boot monitor allows uploading code using Y-modem, and then jumping to the most recently uploaded code.
+The boot ROM can also be run as a CP/M command file. It will copy the OS to `10000`-`12000` and install a BIOS whose warm boot procedure will reload the OS components from there.

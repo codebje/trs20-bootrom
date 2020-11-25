@@ -2,45 +2,83 @@
 
 #target rom
 
-#include "z180registers.asm"
+#include	"src/z180registers.asm"
 
 ; Section definitions
-#code		RESTARTS,$0000,$0100	; RESTART vector table
+#code		PAGE0,$0000,$0100	; Page zero: vectors etc
 #code		BOOT,$0100		; BOOT code
-#code		CPM			; The CPM segment is straight after the boot code
-#code		ROMDISK,$2000,$8000	; the ROM disk is 32kb and must be aligned to 256 bytes
-#data		DATA			; DATA starts after the code
-#data		BIOSDATA,$DD00,$300	; BIOS data region
+#code		BIOSCODE		; BIOS code follows the boot code
+#code		OSDATA			; the OS image is inserted into the binary
+#data		BIOSDATA,BIOS_DATA
 
 ; Constants and definitions
-STACK		equ	BIOSDATA	; point the stack at the end of SRAM
+STACK		equ	CCP		; point the stack at the end of SRAM
 UPLOAD		equ	$2000		; uploaded code beyond CPM
 
 ; Macros
 
-#local
-		macro	asci0_send &data
-
-		; wait for TDRE=1 to indicate transmit register is empty
-		ld	b, &data
-tdre		defl	$
-		in0	a, (STAT0)
-		tst	00000010b		; bit 1: TDRE
-		jr	z, tdre
-		out0	(TDR0), b
-
-		endm
-#endlocal
-
-#code		RESTARTS
+#code		PAGE0
 
 		.org	$0000
+
+		;; The first instruction does an absolute jump to $0103.
+		;; When executed from ROM, this will skip down to _start.
+		;; When executed by CP/M as a command, this will only skip
+		;; to the second instruction here.
 reset:		jp	_start
+
+		;.phase	$0103
+
+		;; Most of the setup has already been done by now
+		;; Just set up the MMU, copy the BIOS, and invoke the BIOS.
+		;; Problem to solve: the BIOS wants to copy the OS from ROM
+		;; Need to copy the OS to somewhere the RAM disk won't
+		;; obliterate it and patch the BIOS to copy the ROM from there.
+
+		; Set up the MMU:	logical		physical
+		;   Common Area 1	e000-ffff	0e000-0ffff
+		;   Bank Area		8000-dfff	08000-0dfff
+		;   Common Area 0	0000-7fff	00000-07fff
+		ld	a, $e8
+		out0	(CBAR), a	; CA1 base = $f000, BA base = $8000
+		xor	a
+		out0	(BBR), a	; the banked area also points to SRAM bank 0
+		out0	(CBR), a	; don't add anything to CA1 accesses
+
+		;; Patch bootrom and BIOS to use bank 1 in SRAM instead of bank 8 in ROM
+		ld	a, 1
+		ld	(biospage+$100), a
+		ld	(ospage+$100), a
+
+		;; copy the BIOS+OS into bank 1: dest $10000, source $000100
+		xor	a
+		out0	(DAR0L), a
+		out0	(DAR0H), a
+		out0	(SAR0L), a
+		out0	(SAR0B), a
+		inc	a
+		out0	(SAR0H), a
+		out0	(DAR0B), a
+
+		ld	bc, $2000		; copy the boot ROM, the BIOS, and the OS
+		out0	(BCR0L),c
+		out0	(BCR0H),b
+
+		ld	bc, 0110000000000010b	; MEM+ -> MEM+, burst mode, ch. 0 enable
+		out0	(DMODE),c
+		out0	(DSTAT),b		; burst mode will halt CPU until complete
+
+		;; let the BIOS take over now
+		jp	copybios+$100
+
+		;.dephase
+
+		; include a visual marker of the boot rom version
+version:	defm	13, 10, 'TRS-20 boot rom v20201125.01', 13, 10, 0
 
 #code		BOOT
 
-		; include a visual marker of the boot rom version
-version:	defm	13, 10, 'TRS-20 boot rom v20200816.01', 13, 10, 0
+		.db	0, 0, 0
 
 _start:		xor	a
 		out0	(RCR), a	; disable the DRAM refresh
@@ -50,7 +88,7 @@ _start:		xor	a
 		ld	a, $80
 		out0	(CCR), a	; boost up to 18.432MHz
 
-		; Prepare ASCI0 very early, to allow status bytes to be sent during the boot-up sequence
+		; Prepare ASCI0
 		ld	a, 01100100b		; RE, TE, 8N1
 		out0	(CNTLA0), a
 
@@ -66,19 +104,18 @@ _start:		xor	a
 		; high physical address, which will disable ROM masking.
 
 		; Set up the MMU:	logical		physical
-		;   Common Area 1	f000-ffff	80000-80fff
-		;   Bank Area		0000-efff	00000-0efff
-		;   Common Area 1	0000-0000	00000-00000
+		;   Common Area 1	e000-ffff	0e000-0ffff
+		;   Bank Area		8000-dfff	08000-0dfff
+		;   Common Area 0	0000-7fff	00000-07fff
+		ld	a, $e8
+		out0	(CBAR), a	; CA1 base = $e000, BA base = $8000
 		xor	a
-		out0	(BBR), a
-		ld	a, $80 - $0F
-		out0	(CBR), a
-		ld	a, $F0
-		out0	(CBAR), a
+		out0	(BBR), a	; the banked area also points to SRAM bank 0
+		out0	(CBR), a	; don't add anything to CA1 accesses
 
-		jp	$+3+$f000
+		jp	$+3+$8000
 
-		; SRAM should now be unmasked. Copy ROM into RAM, then jump back.
+		; SRAM should now be unmasked. Copy the boot ROM into RAM, then jump back.
 
 		xor	a		; destination address 00000
 		out0	(DAR0L), a
@@ -90,7 +127,7 @@ _start:		xor	a
 		ld	a, $08
 		out0	(SAR0B), a
 
-		ld	bc, CPM_end	; copy all the code segments
+		ld	bc, BOOT_size
 		out0	(BCR0L),c
 		out0	(BCR0H),b
 
@@ -112,6 +149,7 @@ _start:		xor	a
 		out0	(DMODE),c
 		out0	(DSTAT),b	; burst mode will halt CPU until complete
 
+		;; jump back to low memory
 		jp	$+3
 
 		; Set up PRT0 with a 100Hz timer
@@ -123,84 +161,12 @@ _start:		xor	a
 
 		ld	sp, STACK	; Set a writable stack location
 
-booting:	call	boot_monitor	; get an input char
-
-		ld	hl, cmdtab
-		ld	b, a
-keys:		ld	a, (hl)
-		inc	hl
-		or	a
-		jr	z, unknown
-		cp	a, b
-		jr	z, match
-		inc	hl
-		inc	hl
-		jr	keys
-
-match:		ld	a,(hl)
-		inc	hl
-		ld	h,(hl)
-		ld	l,a
-		call	jump
-		jr	booting
-jump:		jp	(hl)
-
-unknown:	ld	hl, badcmd
-		call	asci0_xmit
-		jr	booting
-
-badcmd:		.text	'Unknown command, try "?" for help'
-		.db	13,10,0
-
-cmdtab:		.db	'?'
-		.dw	boot_help
-		.db	'y'
-		.dw	ymodem_upload
-		.db	'j'
-		.dw	boot_execute
-		.db	'c'
-		.dw	cpm_execute
-		.db	0
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; boot_help
-#local
-boot_help::	push	hl
-		ld	hl, message
-		call	asci0_xmit
-		pop	hl
-		ret
-message		.text	'Boot ROM menu:',13,10
-		.text	'  ? - this help',13,10
-		.text	'  j - jump to uploaded code',13,10
-		.text	'  y - ymodem receive',13,10
-		.text	'  c - Start CP/M 2.2',13,10,0
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; boot_execute
-#local
-boot_execute::	jp	UPLOAD
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; cpm_execute
-#local
-fill_byte:	.db	$e5
-cpm_execute::	xor	a		; reset MMU to flat SRAM for all 64k
-		out0	(BBR), a	; Bank Area starts at physical 00000
-		out0	(CBR), a	; Common Area 1 starts at physical 0000
-		ld	a, $F0		; Bank Area starts at logical 0000
-		out0	(CBAR), a	; Common Area 1 starts at logical F000
-
-		xor	a		; destination address 20000
-		out0	(DAR0L), a	; source address FILL_BYTE in bank zero
+		;; Erase the RAM disk at $20000 with the fill byte
+		xor	a
+		out0	(DAR0L), a
 		out0	(DAR0H), a
 		out0	(SAR0B), a
-
 		ld	a, 2
-		out0	(DAR0B), a
-
 		ld	bc, fill_byte
 		out0	(SAR0L), c
 		out0	(SAR0H), b
@@ -230,20 +196,22 @@ cpm_execute::	xor	a		; reset MMU to flat SRAM for all 64k
 filler:		out0	(DSTAT), h
 		djnz	filler
 
-		; copy CPM into place
-		xor	a			; destination address 0E000
+copybios:
+		;; copy the BIOS from ROM into $F600
+		xor	a
 		out0	(DAR0B), a
 		out0	(DAR0L), a
-		ld	a, $e0
+		ld	a, $f6
 		out0	(DAR0H), a
 
-		ld	bc, CPM			; source address is the CPM segment ...
+		ld	bc, BIOSCODE
 		out0	(SAR0L), c
 		out0	(SAR0H), b
-		ld	a, $08			; ... in ROM
+		ld	a, $08
+biospage:	equ	$ - 1
 		out0	(SAR0B), a
 
-		ld	bc, $2000 - CPM
+		ld	bc, BIOSCODE_size
 		out0	(BCR0L),c
 		out0	(BCR0H),b
 
@@ -251,212 +219,20 @@ filler:		out0	(DSTAT), h
 		out0	(DMODE),c
 		out0	(DSTAT),b		; burst mode will halt CPU until complete
 
-		jp	CPM_ENTRY
+		;; let the BIOS take over now
+		jp	BIOS_REBOOT
 
-#endlocal
+fill_byte:	.db	$e5
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; bin_to_hex - convert an 8-bit binary value to hex digits
-;;
-;; https://stackoverflow.com/questions/22838444/convert-an-8bit-number-to-hex-in-z80-assembler
-;;
-;; in:		a	value
-;; out:		de	hex digits
-#local
-bin_to_hex::	push	af
-		push	bc
-		ld	c, a
-		call	shift
-		ld	e, a
-		ld	a, c
-		call	convert
-		ld	d, a
-		pop	bc
-		pop	af
-		ret
+#code		BIOSCODE
 
-shift:		rra		; shift higher nibble to lower
-		rra
-		rra
-		rra
-convert:	or	a, $f0
-		daa		; I've no idea if this will work on a Z180...
-		add	a, $a0
-		adc	a, $40
-		ret
-#endlocal
+#include	"src/cbios.asm"
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; boot_monitor
-;;
-;; Wait for user input on ASCI0, periodically transmitting a "hello"
-;; message.
-;;
-;; in:		none
-;; out:		the user input in A
-#local
-boot_monitor::	push	bc
-usrwait:	ld	hl, version
-		call	asci0_xmit	; shout into the void
+;; It's not good if the boot image overruns the OS image
+#assert		BIOSCODE_end <= OS_IMAGE
 
-		ld	hl, input
-		ld	bc, 1
-		ld	de, 3000	; 3000x100Hz = 30 second timeout
-		call	recv_wait
-
-		jr	z, usrwait	; on timeout, go back and shout again
-
-get_char:	ld	a, (input)
-		pop	bc
-		ret
-
-input		.ds	1
-
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; send_byte
-;;
-;; Sends one byte via ASCI0
-;;
-;; in:		a	the byte to send
-;; out:		none
-#local
-send_byte::	push	af
-		push	bc
-		asci0_send a
-		pop	bc
-		pop	af
-		ret
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; recv_byte
-;;
-;; Receives one byte via ASCI0, with a timeout
-;;
-;; in:		de	the timeout measured in 100Hz ticks
-;; out:		a	the byte that was received
-;;		zf	zf is SET if a timeout occurred
-#local
-recv_byte::	push	bc
-		push	de
-		push	hl
-
-		ld	hl, byte+1	; write to the ld operand
-		ld	bc, 1
-		call	recv_wait
-byte:		ld	a, 0
-
-		pop	hl
-		pop	de
-		pop	bc
-		ret
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; recv_wait
-;;
-;; Receives BC bytes from ASCI0 into HL, with a timeout of DEx100Hz.
-;;
-;; in:		bc	count of bytes to read
-;;		hl	destination buffer
-;;		de	timeout, in units of 100Hz
-;; out:		zf	zf is SET if a timeout occurred
-;;		bc	the count of bytes left unread
-;;		de	the original timeout value
-;;		hl	one past the last byte read
-;;		a	undefined
-#local
-recv_wait::	push	de		; preserve the timeout value
-input_loop:	pop	de
-		push	de
-
-		; check for input on ASCI0 in a loop
-timeout:	in0	a, (STAT0)
-		tst	01110000b	; check for errors
-		jr	nz, error
-		tst	10000000b	; RDRF in bit 7 is set when a byte is ready to read
-		jr	nz, get_char
-
-		; check if PRT0 has fired
-		in0	a, (TCR)
-		tst	01000000b	; TIF0 in bit 6
-		jr	z, timeout	; not set: check for input again
-		in0	a, (TMDR0L)	; reset TIF0 by reading TMDR0
-		in0	a, (TMDR0H)	; must read both halves in order!  
-		dec	de		; track how many times PRT0 has fired
-		ld	a,d
-		or	a,e
-		jr	nz, timeout
-
-		; failed to receive a byte: abort with Z set
-		pop	de
-		ret
-
-error:		ld	a, 01100100b	; Reset errors (bit 4=0)
-		out0	(CNTLA0), a
-		jr	timeout
-
-get_char:	in0	a, (RDR0)
-		ld	(hl), a
-		inc	hl
-		dec	bc
-		ld	a, b
-		or	a, c
-		jr	nz, input_loop
-
-		or	a, 1		; clear Z
-return:		pop	de
-		ret
-
-#endlocal
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; asci0_xmit 
-;;
-;; Transmit an ASCIIZ message synchronously over ASCI0
-;;
-;; in:		hl	the message to send
-;; out:		none
-#local
-asci0_xmit::	push	af
-		push	bc
-		push	hl
-
-xmit:		ld	a, (hl)
-
-		; check for NUL terminator
-		or	a
-		jr	z, done
-
-		; wait for TDRE=1 to indicate transmit register is empty
-		ld	b, a
-tdre:		in0	a, (STAT0)
-		tst	00000010b		; bit 1: TDRE
-		jr	z, tdre
-		out0	(TDR0), b
-
-		inc	hl
-		jr	xmit
-
-done:		pop	hl
-		pop	bc
-		pop	af
-		ret
-#endlocal
-
-#include 	"ymodem.asm"
-
-#code		CPM
-#include	"cbios.asm"
-
-		org ROMDISK
-#code		ROMDISK
-#insert		"../bin/romdisk.img"
-
-#data		DATA
-
-#assert		CPM_size <= $2000
+#code		OSDATA
+		org	OS_IMAGE
+#insert		"zsystem.bin"
 
 #end
