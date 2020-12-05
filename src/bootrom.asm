@@ -8,6 +8,7 @@
 #code		PAGE0,$0000,$0100	; Page zero: vectors etc
 #code		BOOT,$0100		; BOOT code
 #code		BIOSCODE		; BIOS code follows the boot code
+#code		BIOSROM			; BIOS code in ROM for banking
 #code		OSDATA			; the OS image is inserted into the binary
 #data		BIOSDATA,BIOS_DATA
 
@@ -74,7 +75,7 @@ reset:		jp	_start
 		;.dephase
 
 		; include a visual marker of the boot rom version
-version:	defm	13, 10, 'TRS-20 boot rom v20201125.01', 13, 10, 0
+version:	defm	'TRS-20 boot ROM v20201205.01', 13, 10, 0
 
 #code		BOOT
 
@@ -111,19 +112,20 @@ _start:		xor	a
 		out0	(CBAR), a	; CA1 base = $e000, BA base = $8000
 		xor	a
 		out0	(BBR), a	; the banked area also points to SRAM bank 0
-		out0	(CBR), a	; don't add anything to CA1 accesses
 
-		jp	$+3+$8000
+		ld	a, $80 - $0e
+		out0	(CBR), a	; CA1 now maps e000-ffff to 80000-81fff
+		jp	$+3+$e000	; jump to the next instruction, but in ROM
 
 		; SRAM should now be unmasked. Copy the boot ROM into RAM, then jump back.
 
-		xor	a		; destination address 00000
+		xor	a		; destination address 00100
 		out0	(DAR0L), a
-		out0	(DAR0H), a
 		out0	(DAR0B), a
-
-		out0	(SAR0L), a	; source address 80000
+		out0	(SAR0L), a	; source address 80100
+		inc	a
 		out0	(SAR0H), a
+		out0	(DAR0H), a
 		ld	a, $08
 		out0	(SAR0B), a
 
@@ -152,6 +154,10 @@ _start:		xor	a
 		;; jump back to low memory
 		jp	$+3
 
+		;; restore CA1 as SRAM
+		xor	a
+		out0	(CBR), a
+
 		; Set up PRT0 with a 100Hz timer
 		ld	hl, 18432000/20/100 - 1
 		out0	(RLDR0L), l
@@ -167,6 +173,7 @@ _start:		xor	a
 		out0	(DAR0H), a
 		out0	(SAR0B), a
 		ld	a, 2
+		out0	(DAR0B), a
 		ld	bc, fill_byte
 		out0	(SAR0L), c
 		out0	(SAR0H), b
@@ -220,11 +227,9 @@ biospage:	equ	$ - 1
 		out0	(DSTAT),b		; burst mode will halt CPU until complete
 
 		;; let the BIOS take over now
-		jp	BIOS_REBOOT
+		jp	REBOOT
 
 fill_byte:	.db	$e5
-
-#code		BIOSCODE
 
 #include	"src/cbios.asm"
 

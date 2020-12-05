@@ -5,3 +5,4 @@
 ../cpmsuite/bin/memchk.com
 ../cpmsuite/bin/wipedsk.com
 ../cpmsuite/bin/ymodem.com
+../../../tmp/zsdos/zsdos2/ZXD.COM

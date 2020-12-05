@@ -9,6 +9,7 @@ ROMDISK		equ	$2000			; ROM disk location (plus $80000)
 OS_IMAGE	equ	$0A00			; offset into ROM of the OS
 OS_SIZE		equ	$1600			; Total size of the operating system
 
+#code		BIOSCODE
 		.phase	BIOS
 
 ;**************************************************************
@@ -35,41 +36,44 @@ WRITE:	JP	BIOS_WRITE			; WRITE DISK
 PRSTAT:	JP	BIOS_PRSTAT			; RETURN LIST STATUS
 SECTRN:	JP	BIOS_SECTRN			; SECTOR TRANSLATE
 
-DISKPARAMS:	dw	0, 0			; A: RAM disk
-		dw	0, 0
-		dw	DIRBF, DPBLK384K
-		dw	0, ALL00
-
-		dw	0, 0			; B: ROM disk
+DISKPARAMS:	
+		dw	0, 0			; A: ROM disk
 		dw	0, 0
 		dw	DIRBF, DPBLK32K
 		dw	0, ALL01
 
+		dw	0, 0			; B: RAM disk
+		dw	0, 0
+		dw	DIRBF, DPBLK384K
+		dw	0, ALL00
+
+		dw	0, 0			; C: SD card
+		dw	0, 0
+		dw	DIRBF, DPBLKSDCARD
+		dw	SDCHECK, SDALLOC
+
 MAXDISKS	equ	($ - DISKPARAMS) / 16
 
-DPBLK384K:	; disk parameter block for a 384KB RAM disk; BLS = 2048, 192 blocks
-		dw	16			; SPT: 16 sectors per track - 192 tracks
-		db	4			; BSH: block shift factor
-		db	15			; BLM: block mask
-		db	1			; EXM: extent mask
-		dw	191			; DSM: maximum BLS # (less offset tracks)
-		dw	127			; DRM: max. directory entries
-		db	%11000000		; AL0: alloc 0 - 64 entries per block, two blocks, 128 entries
-		db	0			; AL1: alloc 1
-		dw	0			; CKS: check size - zero for a non-removable disk
-		dw	0			; OFF: track offset - no reserved tracks
-
-DPBLK32K:	; disk parameter block for a 32KB ROM disk
-		dw	16			; SPT: 16 sectors per track, 16 tracks
-		db	3			; BSH: block shift factor (for 1024-byte blocks)
-		db	7			; BLM: block mask (for 1024-byte blocks)
-		db	0			; EXM: extent mask - zero for disk size < 256
-		dw	31			; DSM: max. BLS#
-		dw	31			; DRM: max. directory entries
-		db	128			; AL0: alloc 0 - one block reserved allows 32 entries
-		db	0			; AL1: alloc 1
-		dw	0			; CKS: check size - zero for a non-removable disk
+;; Construct a disk parameter block with label &NAME
+;; Total disk size &KB (in kb), log2(block size/128) in &BITS, sectors per track in &SPT,
+;; and the number of blocks to use for directory entries in &DIRENT; the disk is fixed if
+;; &FIXED is a true value.
+DPB:		macro	&NAME, &KB, &BITS, &SPT, &DIRENT, &FIXED
+&NAME:		dw	&SPT			; SPT: sectors per track
+		db	&BITS			; BSH: block shift
+		db	#(1<<&BITS)-1		; BLM: block mask
+		db	#1<<(&BITS - (&KB>>(&BITS-3) > 256 ? 4 : 3)) - 1 ; EXM: extent mask
+		dw	#(&KB>>(&BITS-3)) - 1	; DSM: max. block number
+		dw	#(1<<(&BITS+2))*&DIRENT - 1 ; DRM: max. directory entries
+		db	hi($ffff << (16-&DIRENT)) ; AL0: allocation reservation
+		db	lo($ffff << (16-&DIRENT)) ; AL1: allocation reservation
+		dw	&FIXED ? 0 : (&DIRENT<<&BITS) ; CKS
 		dw	0			; OFF: track offset
+		endm
+
+		DPB	DPBLK384K, 384, 4, 16, 2, 1		; 384k RAM disk
+		DPB	DPBLK32K, 32, 3, 16, 1, 1		; 32k ROM disk
+		DPB	DPBLKSDCARD, 16*1024, 7, 256, 1, 0	; 16M SD card
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; BIOS_EXTFN - BIOS extended functions (RST $30)
@@ -118,12 +122,6 @@ BIOS_RAWIN::
 		ret
 #endlocal
 
-#local
-BIOS_RAWOUT::
-		ld	c, e
-		jp	BIOS_CONOUT
-#endlocal
-
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; BIOS_REBOOT - cold boot
 ;;
@@ -136,8 +134,8 @@ BIOS_RAWOUT::
 ;; drive A.
 ;;
 #local
-bootmsg:	defm	13,10,'CP/M 2.2 copyright Digital Research',13,10
-		defm	'TRS-20 BIOS online',13,10,0
+bootmsg:	defm	13,10,'ZSDOS+ZCPR',13,10
+		defm	'TRS-20 BIOS v20201205.01',13,10,0
 
 BIOS_REBOOT::					; COLD BOOT
 		xor	a			; set up initial IOBYTE and USERDRV
@@ -145,15 +143,7 @@ BIOS_REBOOT::					; COLD BOOT
 		ld	(USERDRV), a
 
 		ld	hl, bootmsg
-outloop:	in0	a, (STAT0)
-		tst	00000010b		; check for TDRE=1
-		jr	z, outloop
-		ld	a, (hl)
-		inc	hl
-		or	a
-		jr	z, BIOS_WBOOT
-		out0	(TDR0), a
-		jr	outloop
+		call	BIOS_PRINT
 
 		; carry on into warm boot code
 #endlocal
@@ -236,8 +226,9 @@ ospage::	equ	$$-1
 		;; set up interrupt vectors
 		ld	a, hi(ivec)
 		ld	i, a
-		xor	a
+		ld	a, lo(ivec)
 		out0	(IL), a
+		xor	a
 		out0	(ITC), a
 
 		ei				; safe to get interrupts now
@@ -309,52 +300,35 @@ wait:		call	BIOS_RAWIN
 ;;
 #local
 BIOS_CONOUT::
+		ld	a, c
+		and	$7f
+		ld	e, a
+		;; fall through into BIOS_RAWOUT
 
-#if		1
+#endlocal
+
+#local
+BIOS_RAWOUT::
 
 wait:		in0	a, (STAT0)
 		tst	00000010b		; check for TDRE=1
 		jr	z, wait
-		out0	(TDR0), c
+		out0	(TDR0), e
 		ret
 
-#else
-		ld	hl, asci0_tx_read
-		ld	a, (asci0_tx_write)
-wait:		cp	(hl)
-		jr	z, wait			; wait until the buffer is not full
+#endlocal
 
-		di
-
-		; if the buffer is empty, and ASCI0 is ready to transmit, send direct
-		; else, write to the buffer
-		dec	a
-		cp	(hl)
-		jr	z, buffer
-
-		in	a, (STAT0)
+#local
+BIOS_PRINT::
+wait:		in0	a, (STAT0)
 		tst	00000010b
-		jr	z, buffer
-
-		out0	(TDR0), c
-		jr	done
-
-buffer:		; write the byte into the buffer
-		ld	h, hi(asci0_tx)
-		ld	a, (asci0_tx_write)
-		ld	l, a
-		ld	a, c
-		ld	(hl), a			; write the byte
-		ld	hl, asci0_tx_write	; increment the write cursor
-		inc	(hl)
-
-		ld	a, 00001001b
-		out0	(STAT0), a		; enable TX interrupts
-
-done:		ei
-		ret
-#endif
-
+		jr	z, wait
+		ld	a, (hl)
+		or	a
+		ret	z
+		out0	(TDR0), a
+		inc	hl
+		jr	wait
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -442,8 +416,8 @@ BIOS_SELDSK::					; SELECT DISK
 		ld	hl, 0			; error: will cause a reboot
 		ld	a, c
 		ld	(DISKNO), a
-		cp	2
-		ret	nc			; carry flag set if 2 > a
+		cp	3
+		ret	nc			; carry flag set if A < 3
 		ld	h, 0
 		ld	l, a
 		add	hl, hl			; *2^4 = *16, size of disk param table
@@ -572,9 +546,11 @@ memdisk_addr::	push	de
 BIOS_READ::					; READ DISK
 		ld	a, (DISKNO)
 		or	a			; check for RAM disk
+		jr	z, rom_read
+		dec	a
 		jr	z, ram_read
 		dec	a
-		jr	z, rom_read
+		jr	z, sd_read
 		ld	a, 1
 		ret
 
@@ -606,6 +582,177 @@ mem_read:	call	memdisk_addr
 
 		xor	a
 		ret
+
+sd_read:	call	sd_prep
+		ret	nz
+
+		;; card is ready, work out the sector address
+		ld	hl, (TRACK)		; sd-sector = TRACK*256 + SECTOR
+		ld	de, 8			; + 2048 sectors to first partition
+		add	hl, de
+		ld	a, h
+		ld	h, l
+		ld	l, a
+		ld	(cmd17+2), hl
+		ld	a, (SECTOR)
+		ld	(cmd17+4), a
+
+		call	sd_begin		; activate /CS, transmit 0xFF until 0xFF received
+		ld	a, 1
+		jr	nz, finish
+		ld	hl, cmd17
+		call	sendcmd			; send read sector command
+		call	getr1			; check response
+		tst	$3f
+		ld	a, 1
+		jr	nz, finish
+
+		ld	hl, (DMAAD)		; read straight to DMA area
+		ld	bc, 128			; read just the BDOS sector data
+		call	getdata
+		ld	a, 1
+		jr	nz, finish
+
+		;; consume the remaining 514-130=384 bytes
+		ld	bc, $8002
+eatloop:	ld	a, $ff
+		call	sdtransfer
+		djnz	eatloop
+		dec	c
+		jr	nz, eatloop
+
+		xor	a			; signal happy success
+
+finish:
+		push	af
+		call	sd_end
+		pop	af
+		ret
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; sd_prep - check the SD card is valid and initialise it if needed
+;;
+;; This will read the card's operating condition status register and verify
+;; that the card is ready (bit 31). If the card is not ready, it will attempt
+;; to re-initialise the card. If any operation fails the routine will set A
+;; to 1 and return with the Z flag set.
+;;
+;; in:		none
+;; out:		A	1 on error, 0 otherwise
+;;		FLAGS	ZF reset on error
+#local
+sd_prep::
+		;; set up the SPI lines for low-speed access
+		ld	a, SPI_CTRL_SDCARD | SPI_CTRL_400KHZ
+		out0	(SPI_CTRL), a
+
+		ld	a, 10
+		ld	(ctr), a
+
+ocrcheck:
+		ld	hl, cmd58
+		ld	b, 1
+		call	sdcommand
+		tst	$80			; if bit 7 is set there's no SD card
+		jr	nz, nocard
+		or	a			; if errors or IDLE, try a re-init
+		jr	nz, reinit
+
+		;; The OCR should be C0 FF 80 00 for an SDHC card. Variants will have
+		;; extra bits set, but haven't been tested and should instead fail
+		ld	a, $c0			; OCR bits 31:24 should be 11000000
+		cp	b
+		jr	nz, reinit
+		ld	a, c
+		inc	a
+		jr	nz, nocard		; voltages (24:16) not supported
+		ld	a, $80
+		cp	d
+		jr	nz, nocard		; voltages (15:15) not supported
+		ld	a, e
+		or	a
+		jr	nz, nocard		; last byte should be zero
+
+		;; set up the SPI lines for high-speed access
+		ld	a, SPI_CTRL_SDCARD | SPI_CTRL_6MHZ
+		out0	(SPI_CTRL), a
+
+		xor	a			; A=0, ZF set
+		ret
+
+nocard:
+		xor	a
+		or	a, 1			; reset ZF and set A=1
+		ret
+
+		;; (re-)initialise the SD card, if possible
+reinit:
+		;; check that the init counter isn't clear
+		ld	a, (ctr)
+		or	a
+		jr	z, nocard
+
+		;; begin with 80 clock pulses, /CS inactive
+		ld	b, 10
+pulses:		ld	a, $ff
+		call	sdtransfer
+		djnz	pulses
+
+		;; CMD0 to put the card into IDLE mode
+		ld	hl, cmd0
+		ld	b, 0
+		call	sdcommand
+		dec	a			; R1 should be $01 after CMD0
+		jr	nz, nocard
+
+		;; CMD8 to set voltage and indicate SDHC support
+		ld	hl, cmd8
+		ld	b, 1
+		call	sdcommand
+		dec	a			; R1 should still be $01
+		jr	nz, nocard
+
+		;; validate voltage support and bit pattern: DE=$01AA
+		dec	d
+		jr	nz, nocard		; voltage invalid
+		ld	a, $aa
+		cp	e
+		jr	nz, nocard		; bit pattern mismatch
+
+		ld	a, 10			; try ACMD41 up to 10 times
+		ld	(ctr), a
+initloop:
+		ld	hl, cmd55
+		ld	b, 0
+		call	sdcommand
+		tst	%11111110		; IDLE is ok, all else is not
+		jr	nz, nocard
+
+		ld	hl, acmd41
+		ld	b, 0
+		call	sdcommand
+		or	a
+		jr	z, ready		; good news, everyone
+		tst	%11111110		; any errors?
+		jr	nz, nocard
+
+		ld	bc, 2			; 20ms delay
+		call	delayms
+
+		ld	hl, ctr
+		dec	(hl)
+		jr	nz, initloop
+
+		jr	nocard			; oh well, we tried
+
+ready:
+		; re-do the OCR check, but don't try init again
+		xor	a
+		ld	(ctr), a
+		jp	ocrcheck
+
+ctr:		.db	0
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -622,8 +769,10 @@ mem_read:	call	memdisk_addr
 #local
 BIOS_WRITE::					; WRITE DISK
 		ld	a, (DISKNO)
-		or	a
+		dec	a
 		jr	z, ram_write		; write RAM disk
+		dec	a
+		jr	z, sd_write		; or SD card
 		ld	a, 1
 		ret
 
@@ -653,6 +802,89 @@ ram_write:	ld	bc, $0200
 		xor	a
 		ret
 
+sd_write:	call	sd_prep
+		ret	nz
+
+		;; card is ready, work out the sector address
+		ld	hl, (TRACK)		; sd-sector = TRACK*256 + SECTOR
+		ld	de, 8			; + 2048 sectors to first partition
+		add	hl, de
+		ld	a, h
+		ld	h, l
+		ld	l, a
+		ld	(cmd24+2), hl
+		ld	a, (SECTOR)
+		ld	(cmd24+4), a
+
+		call	sd_begin		; activate /CS, transmit 0xFF until 0xFF received
+		ld	a, 1
+		jr	nz, finish
+		ld	hl, cmd24
+		call	sendcmd			; send write sector command
+		call	getr1			; check response
+		tst	$3f
+		ld	a, 1
+		jr	nz, finish
+
+		ld	a, 0xfe			; data start token
+		call	sdtransfer
+
+		ld	hl, (DMAAD)		; write straight from DMA area
+		ld	b, 128			; write just the BDOS sector data
+writeloop:	ld	a, (hl)
+		inc	hl
+		call	sdtransfer
+		djnz	writeloop
+
+		;; write the remaining 514-128=386 bytes
+		ld	bc, $8202
+stuffloop:	ld	a, $ff
+		call	sdtransfer
+		djnz	stuffloop
+		dec	c
+		jr	nz, stuffloop
+
+		;; try 25 times to get a response
+		ld	b, 25
+acceptloop:	ld	a, $ff
+		call	sdtransfer
+		cp	a, $ff
+		jr	nz, accepted
+		push	bc
+		ld	bc, 1
+		call	delayms
+		pop	bc
+		djnz	acceptloop
+		ld	a, 1
+		jr	finish
+
+accepted:	and	a, $1f
+		cp	a, $5
+		ld	a, 1
+		jr	nz, finish
+
+		;; try 25 times to let the card do its work
+		ld	b, 25
+busyloop:	ld	a, $ff
+		call	sdtransfer
+		or	a
+		jr	nz, written
+		push	bc
+		ld	bc, 1
+		call	delayms
+		pop	bc
+		djnz	busyloop
+		ld	a, 1
+		jr	finish
+
+written:
+		xor	a			; signal happy success
+
+finish:
+		push	af
+		call	sd_end
+		pop	af
+		ret
 #endlocal
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -700,11 +932,6 @@ BIOS_PRSTAT::					; RETURN LIST STATUS
 BIOS_SECTRN::					; SECTOR TRANSLATE
 		ld	hl, bc
 		ret
-		ex	de, hl
-		add	hl, bc
-		ld	l, (hl)
-		ld	h, 0
-		ret
 #endlocal
 
 TRACK:		DS	2			;TWO BYTES FOR EXPANSION
@@ -716,6 +943,9 @@ DIRBF:		DS	128			;SCRATCH DIRECTORY AREA
 ALL00:		DS	24			;ALLOCATION VECTOR 0	DSM=191, vector size = 192/8 = 24 bytes
 ALL01:		DS	4			;ALLOCATION VECTOR 1	DSM=31
 
+SDCHECK:	DS	128			; 128 bytes for SD card checksum vector
+SDALLOC:	DS	256			; 128 bytes for SD card allocation vector, x2
+
 #local
 irq_int1::
 irq_int2::
@@ -726,6 +956,38 @@ irq_csio::
 irq_asci1::
 		ei
 		reti
+#endlocal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; delayms - delay for a number of milliseconds
+;;
+;; delayms relies on PRT0 which is running at 100Hz, and therefore will delay
+;; for a given number of 10ms intervals.
+;;
+;; in:		bc	the number of 10ms intervals to to delay
+#local
+delayms::
+		push	af
+
+		; reset PRT0 counter flag
+		in0	a, (TCR)
+		in0	a, (TMDR0L)
+		in0	a, (TMDR0H)
+
+waitloop:
+		in0	a, (TCR)		; check if timer has fired
+		tst	%01000000		; test TIF0
+		jr	z, waitloop
+		in0	a, (TMDR0L)		; reset TIF0 by reading TMDR0
+		in0	a, (TMDR0H)
+		dec	bc
+		ld	a, b
+		or	c
+		jr	nz, waitloop
+
+		pop	af
+		ret
+
 #endlocal
 
 #local
@@ -799,6 +1061,8 @@ done:		pop	hl
 		reti
 #endlocal
 
+#include	"sdcard.asm"
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ASCI transmit/receive buffers
 ;;
@@ -817,7 +1081,7 @@ asci0_tx_read	ds	1
 asci0_tx_write	ds	1
 asci0_rx_error	ds	1
 
-		.align	$100
+		.align	$20
 ivec:		dw	irq_int1
 		dw	irq_int2
 		dw	irq_prt0
@@ -827,14 +1091,20 @@ ivec:		dw	irq_int1
 		dw	irq_csio
 		dw	irq_asci0
 		dw	irq_asci1
-BIOS_DATA:	equ	ivec+$100
+
+		.align	$100
+BIOS_DATA:	equ	$
 
 #data		BIOSDATA
 asci0_rx	ds	256
 asci0_tx	ds	256
 
-avec:		ds	512
-		ds	255
+;; The BIOSROM segment contains code that needs to be mapped into the bank area at logical $8000.
+#code		BIOSROM
 
 		.dephase
+		.phase	$8000+$
+
+		.dephase
+
 
